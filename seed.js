@@ -33,7 +33,7 @@ const seedData = async () => {
       seller = new User({
         name: 'Dianne Mvkobe',
         email: 'dianne@example.com',
-        password: 'password123',
+        password: 'Password123!',
         role: 'Seller'
       });
       await seller.save();

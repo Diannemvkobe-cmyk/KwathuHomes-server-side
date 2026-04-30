@@ -17,6 +17,8 @@ Where It Fits
 const express = require('express');
 const router = express.Router();
 const Property = require('../models/Property');
+const User = require('../models/User');
+const Report = require('../models/Report');
 const auth = require('../middleware/auth');
 const Log = require('../models/Log');
 
@@ -55,6 +57,56 @@ router.get('/my/listings', auth, async (req, res) => {
       .sort({ createdAt: -1 })
       .populate('owner', OWNER_FIELDS);
     res.json(properties);
+  } catch (err) {
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+router.post('/:id/report', async (req, res) => {
+  try {
+    const property = await Property.findById(req.params.id)
+      .populate('owner', 'name email phone whatsapp')
+      .lean();
+
+    if (!property) {
+      return res.status(404).json({ message: 'Property not found' });
+    }
+
+    const sellerId = property.owner?._id || property.owner;
+    if (!sellerId) {
+      return res.status(400).json({ message: 'Property owner not found' });
+    }
+
+    const reporter = req.body?.reporter || {};
+    let reporterUserId = null;
+
+    if (reporter.id) {
+      const reporterUser = await User.findById(reporter.id).select('_id').lean();
+      reporterUserId = reporterUser?._id || null;
+    }
+
+    const report = await Report.create({
+      seller: sellerId,
+      property: property._id,
+      reporterUser: reporterUserId,
+      reporterName: reporter.name || '',
+      reporterEmail: reporter.email || '',
+      reporterRole: reporter.role || 'Guest',
+    });
+
+    await Log.create({
+      level: 'WARN',
+      message: 'Seller reported',
+      context: {
+        sellerId: String(sellerId),
+        propertyId: String(property._id),
+        reportId: String(report._id),
+        reporterUserId: reporterUserId ? String(reporterUserId) : null,
+        reporterRole: reporter.role || 'Guest',
+      }
+    });
+
+    res.status(201).json({ message: 'The admin has been notified.' });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }

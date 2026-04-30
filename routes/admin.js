@@ -18,6 +18,16 @@ const router = express.Router();
 const User = require('../models/User');
 const Property = require('../models/Property');
 const Log = require('../models/Log');
+const Report = require('../models/Report');
+
+const mapUser = (user) => ({
+  id: user._id,
+  name: user.name,
+  email: user.email,
+  role: user.role,
+  approvalStatus: user.approvalStatus || 'Approved',
+  createdAt: user.createdAt
+});
 
 // Simple admin overview metrics endpoint
 router.get('/overview', async (req, res) => {
@@ -107,19 +117,20 @@ router.get('/traffic', async (req, res) => {
 router.get('/users', async (req, res) => {
   try {
     const users = await User.find({}).sort({ createdAt: -1 }).lean();
-
-    const mapped = users.map((u) => ({
-      id: u._id,
-      name: u.name,
-      email: u.email,
-      role: u.role,
-      createdAt: u.createdAt
-    }));
-
-    res.json(mapped);
+    res.json(users.map(mapUser));
   } catch (err) {
     console.error('Admin users error:', err);
     res.status(500).json({ message: 'Failed to load users', error: err.message });
+  }
+});
+
+router.get('/approvals', async (req, res) => {
+  try {
+    const users = await User.find({ approvalStatus: 'Pending' }).sort({ createdAt: -1 }).lean();
+    res.json(users.map(mapUser));
+  } catch (err) {
+    console.error('Admin approvals error:', err);
+    res.status(500).json({ message: 'Failed to load approval queue', error: err.message });
   }
 });
 
@@ -134,12 +145,10 @@ router.get('/users/:id', async (req, res) => {
     const listingsCount = await Property.countDocuments({ owner: user._id });
 
     res.json({
-      id: user._id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
+      ...mapUser(user),
+      phone: user.phone || '',
+      whatsapp: user.whatsapp || '',
       profilePic: user.profilePic || '',
-      createdAt: user.createdAt,
       listingsCount,
       reports: [] // Placeholder for future user reports
     });
@@ -166,19 +175,64 @@ router.post('/users', async (req, res) => {
       return res.status(400).json({ message: 'User with this email already exists' });
     }
 
-    const user = new User({ name, email, password, role });
+    const user = new User({
+      name,
+      email: email.toLowerCase(),
+      password,
+      role,
+      approvalStatus: 'Approved',
+      approvedAt: new Date(),
+      rejectedAt: null
+    });
     await user.save();
 
-    res.status(201).json({
-      id: user._id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      createdAt: user.createdAt
+    await Log.create({
+      level: 'INFO',
+      message: 'User created by admin',
+      context: { userId: user._id, email: user.email, role: user.role, approvalStatus: user.approvalStatus }
     });
+
+    res.status(201).json(mapUser(user));
   } catch (err) {
     console.error('Admin create user error:', err);
     res.status(500).json({ message: 'Failed to create user', error: err.message });
+  }
+});
+
+router.patch('/users/:id/approval', async (req, res) => {
+  try {
+    const { action } = req.body;
+    if (!['approve', 'reject'].includes(action)) {
+      return res.status(400).json({ message: 'Action must be approve or reject' });
+    }
+
+    const approvalStatus = action === 'approve' ? 'Approved' : 'Rejected';
+    const updates = {
+      approvalStatus,
+      approvedAt: action === 'approve' ? new Date() : null,
+      rejectedAt: action === 'reject' ? new Date() : null
+    };
+
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { $set: updates },
+      { new: true }
+    ).lean();
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    await Log.create({
+      level: 'INFO',
+      message: `User ${action}d by admin`,
+      context: { userId: user._id, email: user.email, role: user.role, approvalStatus: user.approvalStatus }
+    });
+
+    res.json(mapUser(user));
+  } catch (err) {
+    console.error('Admin approval update error:', err);
+    res.status(500).json({ message: 'Failed to update approval status', error: err.message });
   }
 });
 
@@ -226,6 +280,107 @@ router.get('/logs', async (req, res) => {
   } catch (err) {
     console.error('Admin logs error:', err);
     res.status(500).json({ message: 'Failed to load logs', error: err.message });
+  }
+});
+
+router.get('/reports', async (req, res) => {
+  try {
+    const reports = await Report.find({})
+      .sort({ createdAt: -1 })
+      .populate('seller', 'name email phone whatsapp profilePic role createdAt')
+      .populate('property', 'title location price type image createdAt')
+      .lean();
+
+    res.json(reports.map((report) => ({
+      id: report._id,
+      status: report.status,
+      adminAction: report.adminAction || '',
+      createdAt: report.createdAt,
+      resolvedAt: report.resolvedAt,
+      reporter: {
+        id: report.reporterUser || null,
+        name: report.reporterName || '',
+        email: report.reporterEmail || '',
+        role: report.reporterRole || 'Guest',
+      },
+      seller: report.seller ? {
+        id: report.seller._id,
+        name: report.seller.name,
+        email: report.seller.email,
+        phone: report.seller.phone || '',
+        whatsapp: report.seller.whatsapp || '',
+        profilePic: report.seller.profilePic || '',
+        role: report.seller.role || 'Seller',
+        createdAt: report.seller.createdAt || null,
+      } : null,
+      property: report.property ? {
+        id: report.property._id,
+        title: report.property.title,
+        location: report.property.location,
+        price: report.property.price,
+        type: report.property.type,
+        image: report.property.image,
+        createdAt: report.property.createdAt || null,
+      } : null,
+    })));
+  } catch (err) {
+    console.error('Admin reports error:', err);
+    res.status(500).json({ message: 'Failed to load reports', error: err.message });
+  }
+});
+
+router.patch('/reports/:id', async (req, res) => {
+  try {
+    const { status, adminAction } = req.body;
+    const updates = {};
+
+    if (status && ['Open', 'Reviewed', 'Dismissed'].includes(status)) {
+      updates.status = status;
+      updates.resolvedAt = status === 'Open' ? null : new Date();
+    }
+
+    if (adminAction !== undefined) {
+      updates.adminAction = adminAction;
+    }
+
+    const report = await Report.findByIdAndUpdate(
+      req.params.id,
+      { $set: updates },
+      { new: true }
+    )
+      .populate('seller', 'name email phone whatsapp profilePic role createdAt')
+      .populate('property', 'title location price type image createdAt')
+      .lean();
+
+    if (!report) {
+      return res.status(404).json({ message: 'Report not found' });
+    }
+
+    res.json({
+      id: report._id,
+      status: report.status,
+      adminAction: report.adminAction || '',
+      createdAt: report.createdAt,
+      resolvedAt: report.resolvedAt,
+      seller: report.seller ? {
+        id: report.seller._id,
+        name: report.seller.name,
+        email: report.seller.email,
+        phone: report.seller.phone || '',
+        whatsapp: report.seller.whatsapp || '',
+      } : null,
+      property: report.property ? {
+        id: report.property._id,
+        title: report.property.title,
+        location: report.property.location,
+        price: report.property.price,
+        type: report.property.type,
+        image: report.property.image,
+      } : null,
+    });
+  } catch (err) {
+    console.error('Admin update report error:', err);
+    res.status(500).json({ message: 'Failed to update report', error: err.message });
   }
 });
 

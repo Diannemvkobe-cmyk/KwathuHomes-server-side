@@ -16,9 +16,53 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const Property = require('../models/Property');
 const Log = require('../models/Log');
 
 const JWT_SECRET = process.env.JWT_SECRET;
+const SAVED_PROPERTY_FIELDS = 'title description price location beds baths sqft image images type tag owner ownerName ownerPhone ownerWhatsapp ownerEmail ownerProfilePic createdAt updatedAt';
+
+const serializeUser = (user) => ({
+  id: user._id,
+  name: user.name,
+  email: user.email,
+  role: user.role,
+  approvalStatus: user.approvalStatus || 'Approved',
+  phone: user.phone || '',
+  whatsapp: user.whatsapp || '',
+  profilePic: user.profilePic || ''
+});
+
+const ensureBuyer = (req, res) => {
+  if (req.user.role !== 'Buyer') {
+    res.status(403).json({ message: 'Only buyers can manage saved properties' });
+    return false;
+  }
+  return true;
+};
+
+const loadSavedProperties = async (userId) => {
+  const user = await User.findById(userId)
+    .populate({
+      path: 'savedProperties',
+      options: { sort: { createdAt: -1 } },
+      populate: {
+        path: 'owner',
+        select: 'name phone email profilePic'
+      }
+    })
+    .lean();
+
+  if (!user) {
+    return null;
+  }
+
+  const savedProperties = Array.isArray(user.savedProperties)
+    ? user.savedProperties.filter(Boolean)
+    : [];
+
+  return savedProperties;
+};
 
 // REGISTER
 router.post('/register', async (req, res) => {
@@ -32,27 +76,28 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ message: 'User already exists' });
     }
 
-    const user = new User({ name, email: lowerEmail, password, role, phone, profilePic });
+    const user = new User({
+      name,
+      email: lowerEmail,
+      password,
+      role,
+      phone,
+      profilePic,
+      approvalStatus: 'Pending'
+    });
     await user.save();
 
     await Log.create({
       level: 'INFO',
       message: 'New user registered',
-      context: { userId: user._id, email: user.email, role: user.role }
+      context: { userId: user._id, email: user.email, role: user.role, approvalStatus: user.approvalStatus }
     });
 
-    const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
-
     res.status(201).json({
-      token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        phone: user.phone || '',
-        profilePic: user.profilePic || ''
-      }
+      message: 'Registration submitted. The admin has been notified and your account will be approved before you can use the system.',
+      requiresApproval: true,
+      approvalStatus: user.approvalStatus,
+      user: serializeUser(user)
     });
   } catch (err) {
     await Log.create({
@@ -83,6 +128,21 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ message: 'Invalid credentials' });
     }
 
+    const approvalStatus = String(user.approvalStatus || 'Approved');
+    if (approvalStatus === 'Pending') {
+      return res.status(403).json({
+        message: 'Your registration is still pending admin approval.',
+        approvalStatus
+      });
+    }
+
+    if (approvalStatus === 'Rejected') {
+      return res.status(403).json({
+        message: 'Your registration was rejected. Please contact the admin.',
+        approvalStatus
+      });
+    }
+
     if (!JWT_SECRET) {
       await Log.create({
         level: 'ERROR',
@@ -96,19 +156,12 @@ router.post('/login', async (req, res) => {
     await Log.create({
       level: 'INFO',
       message: 'User login',
-      context: { userId: user._id, email: user.email, role: user.role }
+      context: { userId: user._id, email: user.email, role: user.role, approvalStatus: user.approvalStatus || 'Approved' }
     });
 
     res.json({
       token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        phone: user.phone || '',
-        profilePic: user.profilePic || ''
-      }
+      user: serializeUser(user)
     });
   } catch (err) {
     await Log.create({
@@ -123,13 +176,14 @@ router.post('/login', async (req, res) => {
 // UPDATE PROFILE
 router.put('/profile', require('../middleware/auth'), async (req, res) => {
   try {
-    const { name, email, profilePic, phone } = req.body;
+    const { name, email, profilePic, phone, whatsapp } = req.body;
 
     // Build user object
     const userFields = {};
     if (name) userFields.name = name;
     if (email) userFields.email = email;
     if (phone !== undefined) userFields.phone = phone;
+    if (whatsapp !== undefined) userFields.whatsapp = whatsapp;
     if (profilePic !== undefined) userFields.profilePic = profilePic;
 
     let user = await User.findById(req.user.id);
@@ -142,14 +196,90 @@ router.put('/profile', require('../middleware/auth'), async (req, res) => {
     ).select('-password');
 
     res.json({
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        phone: user.phone || '',
-        profilePic: user.profilePic || ''
-      }
+      user: serializeUser(user)
+    });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+router.get('/saved-properties', require('../middleware/auth'), async (req, res) => {
+  try {
+    if (!ensureBuyer(req, res)) return;
+
+    const savedProperties = await loadSavedProperties(req.user.id);
+    if (savedProperties === null) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.json(savedProperties);
+  } catch (err) {
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+router.post('/saved-properties/:propertyId', require('../middleware/auth'), async (req, res) => {
+  try {
+    if (!ensureBuyer(req, res)) return;
+
+    const property = await Property.findById(req.params.propertyId).select(SAVED_PROPERTY_FIELDS);
+    if (!property) {
+      return res.status(404).json({ message: 'Property not found' });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const propertyId = property._id.toString();
+    const savedPropertyIds = Array.isArray(user.savedProperties) ? user.savedProperties : [];
+    const alreadySaved = savedPropertyIds.some((savedId) => String(savedId) === propertyId);
+
+    if (!alreadySaved) {
+      user.savedProperties.push(property._id);
+      await user.save();
+    }
+
+    const savedProperties = await loadSavedProperties(user._id);
+    res.status(alreadySaved ? 200 : 201).json(savedProperties);
+  } catch (err) {
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+router.delete('/saved-properties/:propertyId', require('../middleware/auth'), async (req, res) => {
+  try {
+    if (!ensureBuyer(req, res)) return;
+
+    const user = await User.findByIdAndUpdate(
+      req.user.id,
+      { $pull: { savedProperties: req.params.propertyId } },
+      { new: true }
+    );
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const savedProperties = await loadSavedProperties(user._id);
+    res.json(savedProperties);
+  } catch (err) {
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// GET public user contact info (phone & whatsapp) - no auth required
+router.get('/:id/contact', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('phone whatsapp').lean();
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    res.json({
+      phone: user.phone || '',
+      whatsapp: user.whatsapp || ''
     });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });

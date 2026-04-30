@@ -36,7 +36,24 @@ const userSchema = new mongoose.Schema({
     enum: ['Buyer', 'Seller', 'Admin'],
     default: 'Buyer'
   },
+  approvalStatus: {
+    type: String,
+    enum: ['Pending', 'Approved', 'Rejected'],
+    default: 'Approved'
+  },
+  approvedAt: {
+    type: Date,
+    default: null
+  },
+  rejectedAt: {
+    type: Date,
+    default: null
+  },
   phone: {
+    type: String,
+    default: ''
+  },
+  whatsapp: {
     type: String,
     default: ''
   },
@@ -44,10 +61,14 @@ const userSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  savedProperties: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Property'
+  }],
   createdAt: {
     type: Date,
     default: Date.now
-  }
+  },
 });
 
 // Hash password before saving

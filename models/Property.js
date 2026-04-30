@@ -74,6 +74,10 @@ const propertySchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  ownerWhatsapp: {
+    type: String,
+    default: ''
+  },
   ownerEmail: {
     type: String,
     default: ''
