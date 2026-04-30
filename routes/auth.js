@@ -18,6 +18,8 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Property = require('../models/Property');
 const Log = require('../models/Log');
+const Payment = require('../models/Payment');
+const { validatePassword, passwordValidationMiddleware } = require('../middleware/validation');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const SAVED_PROPERTY_FIELDS = 'title description price location beds baths sqft image images type tag owner ownerName ownerPhone ownerWhatsapp ownerEmail ownerProfilePic createdAt updatedAt';
@@ -68,6 +70,13 @@ const loadSavedProperties = async (userId) => {
 router.post('/register', async (req, res) => {
   try {
     const { name, email, password, role, phone, profilePic } = req.body;
+
+    // Server-side validation
+    const { isValid, message } = validatePassword(password);
+    if (!isValid) {
+      return res.status(400).json({ message });
+    }
+
     const lowerEmail = String(email || '').toLowerCase().trim();
 
     // Check if user exists
@@ -283,6 +292,153 @@ router.get('/:id/contact', async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// --- Payment Routes ---
+// Create a new payment
+router.post('/payments', require('../middleware/auth'), async (req, res) => {
+  try {
+    const { propertyId, property, amount, paymentMethod, paymentDetails } = req.body;
+
+    const prop = await Property.findById(propertyId);
+    if (!prop) {
+      return res.status(404).json({ message: 'Property not found' });
+    }
+
+    if (prop.underPayment || prop.sold) {
+      return res.status(400).json({ message: 'Property is already under payment or sold' });
+    }
+
+    const payment = new Payment({
+      buyerId: req.user.id,
+      sellerId: prop.owner,
+      propertyId,
+      property,
+      amount,
+      paymentMethod,
+      paymentDetails
+    });
+    await payment.save();
+
+    // Mark property as under payment
+    prop.underPayment = true;
+    await prop.save();
+
+    // Log to admin audit logs
+    await Log.create({
+      level: 'INFO',
+      message: 'Payment created',
+      context: { 
+        action: 'PAYMENT_CREATED',
+        details: `Payment created for property ${property.title}`,
+        userId: req.user.id 
+      }
+    });
+
+    res.json(payment);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Get all payments for current user (buyer OR seller)
+router.get('/payments', require('../middleware/auth'), async (req, res) => {
+  try {
+    let payments;
+    if (req.user.role === 'Seller') {
+      payments = await Payment.find({ sellerId: req.user.id }).sort({ createdAt: -1 });
+    } else {
+      payments = await Payment.find({ buyerId: req.user.id }).sort({ createdAt: -1 });
+    }
+    res.json(payments);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Approve a payment
+router.post('/payments/:id/approve', require('../middleware/auth'), async (req, res) => {
+  try {
+    const payment = await Payment.findById(req.params.id);
+
+    if (!payment) {
+      return res.status(404).json({ message: 'Payment not found' });
+    }
+
+    if (payment.buyerId.toString() !== req.user.id.toString()) {
+      return res.status(403).json({ message: 'Not authorized' });
+    }
+
+    payment.status = 'approved';
+    await payment.save();
+
+    // Mark property as sold
+    const prop = await Property.findById(payment.propertyId);
+    if (prop) {
+      prop.sold = true;
+      prop.underPayment = false;
+      await prop.save();
+    }
+
+    // Log to admin audit logs
+    await Log.create({
+      level: 'INFO',
+      message: 'Payment approved',
+      context: { 
+        action: 'PAYMENT_APPROVED',
+        details: `Payment approved for property ${payment.property.title}`,
+        userId: req.user.id 
+      }
+    });
+
+    res.json(payment);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Reverse a payment
+router.post('/payments/:id/reverse', require('../middleware/auth'), async (req, res) => {
+  try {
+    const payment = await Payment.findById(req.params.id);
+
+    if (!payment) {
+      return res.status(404).json({ message: 'Payment not found' });
+    }
+
+    if (payment.buyerId.toString() !== req.user.id.toString()) {
+      return res.status(403).json({ message: 'Not authorized' });
+    }
+
+    payment.status = 'reversed';
+    await payment.save();
+
+    // Mark property as NOT under payment
+    const prop = await Property.findById(payment.propertyId);
+    if (prop) {
+      prop.underPayment = false;
+      await prop.save();
+    }
+
+    // Log to admin audit logs
+    await Log.create({
+      level: 'INFO',
+      message: 'Payment reversed',
+      context: { 
+        action: 'PAYMENT_REVERSED',
+        details: `Payment reversed for property ${payment.property.title}`,
+        userId: req.user.id 
+      }
+    });
+
+    res.json(payment);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server error' });
   }
 });
 

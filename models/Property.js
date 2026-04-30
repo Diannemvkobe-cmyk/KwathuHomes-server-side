@@ -85,9 +85,31 @@ const propertySchema = new mongoose.Schema({
   ownerProfilePic: {
     type: String,
     default: ''
+  },
+  coordinates: {
+    type: {
+      type: String,
+      enum: ['Point'],
+      default: 'Point'
+    },
+    coordinates: {
+      type: [Number], // [longitude, latitude]
+      required: true,
+      default: [28.3228, -15.3875] // Default to Lusaka center
+    }
+  },
+  underPayment: {
+    type: Boolean,
+    default: false
+  },
+  sold: {
+    type: Boolean,
+    default: false
   }
 }, {
   timestamps: true
 });
+
+propertySchema.index({ coordinates: '2dsphere' });
 
 module.exports = mongoose.model('Property', propertySchema);

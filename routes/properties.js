@@ -24,6 +24,34 @@ const Log = require('../models/Log');
 
 const OWNER_FIELDS = 'name phone email profilePic';
 
+// GET properties near a location
+router.get('/near-me', async (req, res) => {
+  const { lat, lng, radius = 5000 } = req.query; // radius in meters
+  
+  if (!lat || !lng) {
+    return res.status(400).json({ message: 'Latitude and longitude are required' });
+  }
+
+  try {
+    const properties = await Property.find({
+      coordinates: {
+        $near: {
+          $geometry: {
+            type: 'Point',
+            coordinates: [parseFloat(lng), parseFloat(lat)]
+          },
+          $maxDistance: parseInt(radius)
+        }
+      }
+    }).populate('owner', OWNER_FIELDS);
+    
+    res.json(properties);
+  } catch (err) {
+    console.error('Proximity search error:', err);
+    res.status(500).json({ message: 'Error fetching nearby properties', error: err.message });
+  }
+});
+
 // GET all properties
 router.get('/', async (req, res) => {
   try {

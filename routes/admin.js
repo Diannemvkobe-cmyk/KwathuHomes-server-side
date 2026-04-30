@@ -19,6 +19,7 @@ const User = require('../models/User');
 const Property = require('../models/Property');
 const Log = require('../models/Log');
 const Report = require('../models/Report');
+const { passwordValidationMiddleware } = require('../middleware/validation');
 
 const mapUser = (user) => ({
   id: user._id,
@@ -159,7 +160,7 @@ router.get('/users/:id', async (req, res) => {
 });
 
 // Create user (admin)
-router.post('/users', async (req, res) => {
+router.post('/users', passwordValidationMiddleware, async (req, res) => {
   try {
     const { name, email, password, role } = req.body;
     if (!name || !email || !password || !role) {
