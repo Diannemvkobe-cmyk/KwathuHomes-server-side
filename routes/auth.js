@@ -35,6 +35,40 @@ const serializeUser = (user) => ({
   profilePic: user.profilePic || ''
 });
 
+const serializePaymentRecord = (payment) => {
+  const currentProperty = payment.propertyId && typeof payment.propertyId === 'object'
+    ? payment.propertyId
+    : null;
+  const buyerRecord = payment.buyerId && typeof payment.buyerId === 'object'
+    ? payment.buyerId
+    : null;
+
+  return {
+    ...payment,
+    buyerId: buyerRecord?._id || payment.buyerId || null,
+    sellerId: payment.sellerId?._id || payment.sellerId || null,
+    propertyId: currentProperty?._id || payment.propertyId || null,
+    buyer: {
+      id: buyerRecord?._id || payment.buyerId || null,
+      name: buyerRecord?.name || payment.buyerName || 'Buyer',
+      email: buyerRecord?.email || payment.buyerEmail || '',
+      phone: buyerRecord?.phone || payment.buyerPhone || ''
+    },
+    seller: {
+      id: payment.sellerId?._id || payment.sellerId || null,
+      name: payment.sellerName || '',
+      email: payment.sellerEmail || ''
+    },
+    property: currentProperty
+      ? {
+          ...payment.property,
+          ...currentProperty,
+        }
+      : payment.property,
+    propertyDeleted: !currentProperty,
+  };
+};
+
 const ensureBuyer = (req, res) => {
   if (req.user.role !== 'Buyer') {
     res.status(403).json({ message: 'Only buyers can manage saved properties' });
@@ -299,9 +333,13 @@ router.get('/:id/contact', async (req, res) => {
 // Create a new payment
 router.post('/payments', require('../middleware/auth'), async (req, res) => {
   try {
-    const { propertyId, property, amount, paymentMethod, paymentDetails } = req.body;
+    if (req.user.role !== 'Buyer') {
+      return res.status(403).json({ message: 'Only buyers can create payments' });
+    }
 
-    const prop = await Property.findById(propertyId);
+    const { propertyId, amount, paymentMethod, paymentDetails } = req.body;
+
+    const prop = await Property.findById(propertyId).populate('owner', 'name email phone');
     if (!prop) {
       return res.status(404).json({ message: 'Property not found' });
     }
@@ -310,11 +348,34 @@ router.post('/payments', require('../middleware/auth'), async (req, res) => {
       return res.status(400).json({ message: 'Property is already under payment or sold' });
     }
 
+    if (String(prop.owner?._id || prop.owner) === String(req.user.id)) {
+      return res.status(400).json({ message: 'You cannot buy your own property' });
+    }
+
+    const buyer = await User.findById(req.user.id).select('name email phone');
+    if (!buyer) {
+      return res.status(404).json({ message: 'Buyer not found' });
+    }
+
     const payment = new Payment({
       buyerId: req.user.id,
-      sellerId: prop.owner,
+      buyerName: buyer.name || '',
+      buyerEmail: buyer.email || '',
+      buyerPhone: buyer.phone || '',
+      sellerId: prop.owner?._id || prop.owner,
+      sellerName: prop.owner?.name || prop.ownerName || '',
+      sellerEmail: prop.owner?.email || prop.ownerEmail || '',
       propertyId,
-      property,
+      property: {
+        title: prop.title,
+        location: prop.location,
+        image: prop.image,
+        images: prop.images,
+        price: prop.price,
+        type: prop.type,
+        sold: prop.sold,
+        underPayment: true,
+      },
       amount,
       paymentMethod,
       paymentDetails
@@ -331,7 +392,7 @@ router.post('/payments', require('../middleware/auth'), async (req, res) => {
       message: 'Payment created',
       context: { 
         action: 'PAYMENT_CREATED',
-        details: `Payment created for property ${property.title}`,
+        details: `Payment created for property ${prop.title}`,
         userId: req.user.id 
       }
     });
@@ -348,11 +409,18 @@ router.get('/payments', require('../middleware/auth'), async (req, res) => {
   try {
     let payments;
     if (req.user.role === 'Seller') {
-      payments = await Payment.find({ sellerId: req.user.id }).sort({ createdAt: -1 });
+      payments = await Payment.find({ sellerId: req.user.id })
+        .populate('buyerId', 'name email phone')
+        .populate('propertyId', 'title location image images sold underPayment owner')
+        .sort({ createdAt: -1 })
+        .lean();
     } else {
-      payments = await Payment.find({ buyerId: req.user.id }).sort({ createdAt: -1 });
+      payments = await Payment.find({ buyerId: req.user.id })
+        .populate('propertyId', 'title location image images sold underPayment owner')
+        .sort({ createdAt: -1 })
+        .lean();
     }
-    res.json(payments);
+    res.json(payments.map(serializePaymentRecord));
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: 'Server error' });
@@ -372,7 +440,13 @@ router.post('/payments/:id/approve', require('../middleware/auth'), async (req, 
       return res.status(403).json({ message: 'Not authorized' });
     }
 
+    if (payment.status !== 'pending') {
+      return res.status(400).json({ message: 'Only pending payments can be approved' });
+    }
+
     payment.status = 'approved';
+    payment.approvedAt = new Date();
+    payment.reversedAt = null;
     await payment.save();
 
     // Mark property as sold
@@ -414,7 +488,13 @@ router.post('/payments/:id/reverse', require('../middleware/auth'), async (req, 
       return res.status(403).json({ message: 'Not authorized' });
     }
 
+    if (payment.status !== 'pending') {
+      return res.status(400).json({ message: 'Only pending payments can be reversed' });
+    }
+
     payment.status = 'reversed';
+    payment.reversedAt = new Date();
+    payment.approvedAt = null;
     await payment.save();
 
     // Mark property as NOT under payment

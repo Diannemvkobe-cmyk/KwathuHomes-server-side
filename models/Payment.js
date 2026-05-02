@@ -6,10 +6,30 @@ const paymentSchema = new mongoose.Schema({
     ref: 'User',
     required: true
   },
+  buyerName: {
+    type: String,
+    default: ''
+  },
+  buyerEmail: {
+    type: String,
+    default: ''
+  },
+  buyerPhone: {
+    type: String,
+    default: ''
+  },
   sellerId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true
+  },
+  sellerName: {
+    type: String,
+    default: ''
+  },
+  sellerEmail: {
+    type: String,
+    default: ''
   },
   propertyId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -33,6 +53,14 @@ const paymentSchema = new mongoose.Schema({
     type: String,
     enum: ['pending', 'approved', 'reversed'],
     default: 'pending'
+  },
+  approvedAt: {
+    type: Date,
+    default: null
+  },
+  reversedAt: {
+    type: Date,
+    default: null
   },
   paymentDetails: {
     type: Object,
